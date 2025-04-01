@@ -121,6 +121,32 @@ pub fn parse_tool_call(text: &str) -> Result<ToolCall, ToolParseError> {
     })
 }
 
+fn main() {
+    let example_text = r#"
+明日のニューヨークの天気ですね。承知いたしました。
+外部の天気予報ツールを使って最新の情報を確認しますね。
+
+<get_weather>
+  <location>New York</location>
+  <date>tomorrow</date>
+  <unit>fahrenheit</unit>
+</get_weather>
+
+結果が取得でき次第、すぐにお知らせします。
+"#;
+
+    match parse_tool_call(example_text) {
+        Ok(tool_call) => {
+            println!("Tool name: {}", tool_call.tool_name);
+            println!("Parameters:");
+            for (key, value) in tool_call.parameters {
+                println!("  {}: {}", key, value);
+            }
+        }
+        Err(e) => eprintln!("Error parsing tool call: {:?}", e),
+    }
+}
+
 // --- テスト ---
 #[cfg(test)]
 mod tests {
@@ -215,31 +241,5 @@ Let me know if that looks correct.
             Err(_) => {} // Expected some error (likely MismatchedEndTag or XmlError)
             Ok(_) => panic!("Should have failed due to malformed XML."),
         }
-    }
-}
-
-fn main() {
-    let example_text = r#"
-明日のニューヨークの天気ですね。承知いたしました。
-外部の天気予報ツールを使って最新の情報を確認しますね。
-
-<get_weather>
-  <location>New York</location>
-  <date>tomorrow</date>
-  <unit>fahrenheit</unit>
-</get_weather>
-
-結果が取得でき次第、すぐにお知らせします。
-"#;
-
-    match parse_tool_call(example_text) {
-        Ok(tool_call) => {
-            println!("Tool name: {}", tool_call.tool_name);
-            println!("Parameters:");
-            for (key, value) in tool_call.parameters {
-                println!("  {}: {}", key, value);
-            }
-        }
-        Err(e) => eprintln!("Error parsing tool call: {:?}", e),
     }
 }

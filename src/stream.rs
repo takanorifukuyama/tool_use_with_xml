@@ -1,7 +1,5 @@
 use quick_xml::Reader;
 use quick_xml::events::Event;
-use std::collections::HashMap;
-use std::error::Error;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use tokio_stream::Stream;
@@ -220,11 +218,35 @@ impl Stream for ToolCallStream {
     }
 }
 
+#[tokio::main]
+async fn main() {
+    let xml = r#"<get_weather><location>Tokyo</location><date>2024-03-21</date></get_weather>"#;
+
+    let stream = ToolCallStream::new(xml.as_bytes());
+    let mut stream = Box::pin(stream);
+
+    while let Some(result) = stream.next().await {
+        match result {
+            Ok(event) => match event {
+                ToolCallEvent::ToolStart(name) => println!("ツール開始: {}", name),
+                ToolCallEvent::Parameter { name, value } => {
+                    println!("パラメータ: {} = {}", name, value)
+                }
+                ToolCallEvent::ToolEnd => println!("ツール終了"),
+                ToolCallEvent::Error(err) => println!("ツールエラー: {}", err),
+            },
+            Err(e) => println!("エラー: {}", e),
+        }
+    }
+
+    println!("---イベントストリーム終了---");
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use futures::StreamExt;
-    use tokio;
+    
 
     #[tokio::test]
     async fn test_stream_parser() {
@@ -251,28 +273,4 @@ mod tests {
         );
         assert!(matches!(events[2], Ok(ToolCallEvent::ToolEnd)));
     }
-}
-
-#[tokio::main]
-async fn main() {
-    let xml = r#"<get_weather><location>Tokyo</location><date>2024-03-21</date></get_weather>"#;
-
-    let stream = ToolCallStream::new(xml.as_bytes());
-    let mut stream = Box::pin(stream);
-
-    while let Some(result) = stream.next().await {
-        match result {
-            Ok(event) => match event {
-                ToolCallEvent::ToolStart(name) => println!("ツール開始: {}", name),
-                ToolCallEvent::Parameter { name, value } => {
-                    println!("パラメータ: {} = {}", name, value)
-                }
-                ToolCallEvent::ToolEnd => println!("ツール終了"),
-                ToolCallEvent::Error(err) => println!("ツールエラー: {}", err),
-            },
-            Err(e) => println!("エラー: {}", e),
-        }
-    }
-
-    println!("---イベントストリーム終了---");
 }
