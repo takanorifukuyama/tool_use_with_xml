@@ -246,7 +246,6 @@ async fn main() {
 mod tests {
     use super::*;
     use futures::StreamExt;
-    
 
     #[tokio::test]
     async fn test_stream_parser() {
