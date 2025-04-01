@@ -22,16 +22,20 @@ pub enum ToolCallEvent {
     /// テキストイベント：XMLタグ以外のテキストを表す
     Text(String),
     /// ツール呼び出しの開始：<tool_name>タグの検出
-    ToolStart { name: String },
+    ToolStart { id: String, name: String },
     /// パラメータの受信：ツール呼び出しに含まれるパラメータ
-    Parameter { arguments: serde_json::Value },
+    Parameter {
+        id: String,
+        arguments: serde_json::Value,
+    },
     /// ツール呼び出しの終了：</tool_name>タグの検出
-    ToolEnd,
+    ToolEnd { id: String },
     /// エラーイベント：処理中に発生したエラー
     Error(String),
 }
 
-type ToolCallStream = Result<BoxStream<'static, ToolCallEvent>>;
+type ToolCallStream = BoxStream<'static, ToolCallEvent>;
+type ToolCallStreamResult = Result<ToolCallStream>;
 
 /// パーサーの状態を表すenum
 #[derive(Debug)]
@@ -66,6 +70,10 @@ struct StreamToStream {
     need_to_emit_tool_end: bool,
     /// XMLタグ内にいるかどうか
     in_xml: bool,
+    /// 現在のツールのID
+    current_id: Option<String>,
+    /// IDカウンター
+    id_counter: u64,
 }
 
 impl StreamToStream {
@@ -81,7 +89,15 @@ impl StreamToStream {
             last_char_was_newline: false,
             need_to_emit_tool_end: false,
             in_xml: false,
+            current_id: None,
+            id_counter: 0,
         }
+    }
+
+    /// 新しいIDを生成
+    fn generate_id(&mut self) -> String {
+        self.id_counter += 1;
+        format!("tool_{}", self.id_counter)
     }
 
     /// 1文字を処理し、必要に応じてイベントを生成
@@ -127,20 +143,25 @@ impl StreamToStream {
                             if current_tool == &tag_name {
                                 // ツールの終了
                                 self.state = ParserState::Normal;
+                                let id = self
+                                    .current_id
+                                    .clone()
+                                    .unwrap_or_else(|| "unknown".to_string());
                                 self.current_tool = None;
                                 self.in_xml = false;
                                 self.last_char_was_newline = false;
                                 if !self.current_params.is_empty() {
                                     // パラメータがある場合は、まずパラメータを出力
+                                    let params = std::mem::take(&mut self.current_params);
                                     self.need_to_emit_tool_end = true;
                                     Some(ToolCallEvent::Parameter {
-                                        arguments: serde_json::Value::Object(
-                                            self.current_params.clone(),
-                                        ),
+                                        id: id.clone(),
+                                        arguments: serde_json::Value::Object(params),
                                     })
                                 } else {
                                     // パラメータがない場合は、直接ToolEndを出力
-                                    Some(ToolCallEvent::ToolEnd)
+                                    self.current_id = None;
+                                    Some(ToolCallEvent::ToolEnd { id })
                                 }
                             } else {
                                 // パラメータタグの終了
@@ -161,9 +182,11 @@ impl StreamToStream {
                     } else {
                         if self.current_tool.is_none() {
                             // ツールの開始
+                            let id = self.generate_id();
+                            self.current_id = Some(id.clone());
                             self.current_tool = Some(tag.clone());
                             self.state = ParserState::InToolTag;
-                            Some(ToolCallEvent::ToolStart { name: tag })
+                            Some(ToolCallEvent::ToolStart { id, name: tag })
                         } else {
                             // パラメータタグの開始
                             self.state = ParserState::InParameterTag(tag);
@@ -216,7 +239,9 @@ impl Stream for StreamToStream {
         // ToolEndイベントの遅延発行
         if this.need_to_emit_tool_end {
             this.need_to_emit_tool_end = false;
-            return Poll::Ready(Some(ToolCallEvent::ToolEnd));
+            if let Some(id) = this.current_id.take() {
+                return Poll::Ready(Some(ToolCallEvent::ToolEnd { id }));
+            }
         }
 
         // 入力ストリームからの次の文字を処理
@@ -232,10 +257,18 @@ impl Stream for StreamToStream {
                 // 入力ストリームの終了処理
                 if this.need_to_emit_tool_end {
                     this.need_to_emit_tool_end = false;
-                    Poll::Ready(Some(ToolCallEvent::ToolEnd))
+                    if let Some(id) = this.current_id.take() {
+                        Poll::Ready(Some(ToolCallEvent::ToolEnd { id }))
+                    } else {
+                        Poll::Ready(None)
+                    }
                 } else if this.current_tool.is_some() {
-                    this.current_tool = None;
-                    Poll::Ready(Some(ToolCallEvent::ToolEnd))
+                    if let Some(id) = this.current_id.take() {
+                        this.current_tool = None;
+                        Poll::Ready(Some(ToolCallEvent::ToolEnd { id }))
+                    } else {
+                        Poll::Ready(None)
+                    }
                 } else {
                     Poll::Ready(None)
                 }
@@ -246,17 +279,16 @@ impl Stream for StreamToStream {
 }
 
 /// 入力ストリームをツール呼び出しイベントのストリームに変換
-fn stream_to_stream(input: BoxStream<'static, String>) -> ToolCallStream {
+fn stream_to_stream(input: BoxStream<'static, String>) -> ToolCallStreamResult {
     let stream = StreamToStream::new(input);
     Ok(Box::pin(stream))
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use pretty_assertions::assert_eq;
     use tokio_stream::StreamExt;
-
-    use super::*;
 
     /// メインのストリーム変換テスト
     ///
@@ -307,16 +339,20 @@ mod tests {
             ToolCallEvent::Text("。".into()),
             ToolCallEvent::Text("\n".into()),
             ToolCallEvent::ToolStart {
+                id: "tool_1".to_string(),
                 name: "get_weather".to_string(),
             },
             ToolCallEvent::Parameter {
+                id: "tool_1".to_string(),
                 arguments: serde_json::json!({
                     "location": "New York",
                     "date": "tomorrow",
                     "unit": "fahrenheit"
                 }),
             },
-            ToolCallEvent::ToolEnd,
+            ToolCallEvent::ToolEnd {
+                id: "tool_1".to_string(),
+            },
             ToolCallEvent::Text("\n".into()),
             ToolCallEvent::Text("結".into()),
             ToolCallEvent::Text("果".into()),
@@ -349,12 +385,6 @@ mod tests {
         Ok(())
     }
 
-    /// ファイル書き込みのツール呼び出しのテスト
-    ///
-    /// このテストでは以下の点を確認します：
-    /// - ツール呼び出しの前後のテキストの処理
-    /// - 複数行のコンテンツを含むパラメータの処理
-    /// - 改行とインデントの適切な処理
     #[tokio::test]
     async fn test_write_to_file() -> Result<()> {
         let input = r#"Okay, I will write the following content to the file.
@@ -428,17 +458,21 @@ Let me know if that looks correct."#;
             ToolCallEvent::Text("\n".into()),
             // ツール呼び出しの開始
             ToolCallEvent::ToolStart {
+                id: "tool_1".to_string(),
                 name: "write_to_file".to_string(),
             },
             // パラメータ
             ToolCallEvent::Parameter {
+                id: "tool_1".to_string(),
                 arguments: serde_json::json!({
                     "path": "src/main.rs",
                     "content": "fn main() {\n    println!(\"Hello, world!\");\n}"
                 }),
             },
             // ツール呼び出しの終了
-            ToolCallEvent::ToolEnd,
+            ToolCallEvent::ToolEnd {
+                id: "tool_1".to_string(),
+            },
             // 最後のテキスト
             ToolCallEvent::Text("\n".into()),
             ToolCallEvent::Text("L".into()),
@@ -490,5 +524,66 @@ Let me know if that looks correct."#;
 
 #[tokio::main]
 async fn main() {
-    unimplemented!()
+    // サンプルの入力テキスト
+    let input = r#"明日のニューヨークの天気を確認します。
+
+<get_weather>
+  <location>New York</location>
+  <date>tomorrow</date>
+  <unit>fahrenheit</unit>
+</get_weather>
+
+天気予報を取得しました。次に、ファイルに書き込みます。
+
+<write_to_file>
+<path>weather_report.txt</path>
+<content>
+明日のニューヨークの天気予報：
+- 最高気温: 75°F
+- 最低気温: 60°F
+- 天候: 晴れ時々曇り
+</content>
+</write_to_file>
+
+処理が完了しました。"#;
+
+    // 入力テキストを1文字ずつのストリームに変換
+    let input_stream = Box::pin(futures::stream::iter(input.chars().map(|c| c.to_string())));
+
+    // ストリームを処理
+    match stream_to_stream(input_stream) {
+        Ok(mut stream) => {
+            // イベントを順番に処理
+            while let Some(event) = stream.next().await {
+                match event {
+                    ToolCallEvent::Text(text) => {
+                        // テキストイベントの処理
+                        print!("{}", text);
+                    }
+                    ToolCallEvent::ToolStart { id, name } => {
+                        // ツール開始イベントの処理
+                        println!("\n[ツール開始: {} (ID: {})]", name, id);
+                    }
+                    ToolCallEvent::Parameter { id, arguments } => {
+                        // パラメータイベントの処理
+                        println!(
+                            "[パラメータ (ID: {}): {}]",
+                            id,
+                            serde_json::to_string_pretty(&arguments).unwrap()
+                        );
+                    }
+                    ToolCallEvent::ToolEnd { id } => {
+                        // ツール終了イベントの処理
+                        println!("[ツール終了 (ID: {})]\n", id);
+                    }
+                    ToolCallEvent::Error(err) => {
+                        eprintln!("エラー: {}", err);
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("ストリームの作成に失敗しました: {}", e);
+        }
+    }
 }
