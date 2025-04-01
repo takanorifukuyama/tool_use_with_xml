@@ -1,3 +1,72 @@
+//! XMLストリームをツール呼び出しイベントのストリームに変換するモジュール
+//!
+//! このモジュールは、XMLフォーマットのテキストストリームを解析し、
+//! ツール呼び出しイベントのストリームに変換する機能を提供します。
+//!
+//! # 主な機能
+//!
+//! - XMLテキストの1文字ずつのストリーミング処理
+//! - ツール呼び出しの開始・終了の検出
+//! - パラメータの収集と構造化
+//! - イベントの生成と配信
+//!
+//! # イベントの種類
+//!
+//! - `ToolStart`: ツール呼び出しの開始
+//! - `Parameter`: ツールのパラメータ
+//! - `ToolEnd`: ツール呼び出しの終了
+//! - `Text`: XMLタグ以外のテキスト
+//! - `Error`: エラー発生時のイベント
+//!
+//! # 実行方法
+//!
+//! ## ビルドと実行
+//!
+//! ```bash
+//! # ビルド
+//! cargo build --bin stream_to_stream
+//!
+//! # 実行
+//! cargo run --bin stream_to_stream
+//! ```
+//!
+//! ## テストの実行
+//!
+//! ```bash
+//! # すべてのテストを実行
+//! cargo test --package tool_use_with_xml --bin stream_to_stream
+//!
+//! # 特定のテストを実行（例：test_stream_to_stream）
+//! cargo test --package tool_use_with_xml --bin stream_to_stream -- tests::test_stream_to_stream --exact
+//!
+//! # テスト出力を表示
+//! cargo test --package tool_use_with_xml --bin stream_to_stream -- tests --show-output
+//! ```
+//!
+//! # 使用例
+//!
+//! ```rust
+//! use futures::StreamExt;
+//!
+//! let input = r#"<get_weather>
+//!   <location>Tokyo</location>
+//!   <date>tomorrow</date>
+//! </get_weather>"#;
+//!
+//! let input_stream = Box::pin(futures::stream::iter(input.chars().map(|c| c.to_string())));
+//! let mut stream = stream_to_stream(input_stream)?;
+//!
+//! while let Some(event) = stream.next().await {
+//!     match event {
+//!         ToolCallEvent::ToolStart { id, name } => println!("ツール開始: {} (ID: {})", name, id),
+//!         ToolCallEvent::Parameter { id, arguments } => println!("パラメータ (ID: {}): {:?}", id, arguments),
+//!         ToolCallEvent::ToolEnd { id } => println!("ツール終了 (ID: {})", id),
+//!         ToolCallEvent::Text(text) => print!("{}", text),
+//!         ToolCallEvent::Error(err) => eprintln!("エラー: {}", err),
+//!     }
+//! }
+//! ```
+
 use futures::StreamExt;
 use futures::stream::BoxStream;
 use std::pin::Pin;
