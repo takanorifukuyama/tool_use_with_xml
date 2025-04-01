@@ -98,31 +98,21 @@ impl StreamToStream {
                     self.state = ParserState::InTag;
                     self.tag_buffer.clear();
                     self.in_xml = true;
-                    self.last_char_was_newline = false; // XMLタグ開始時にリセット
                     None
                 } else {
                     if c == "\n" {
-                        if self.in_xml {
-                            // XMLタグ内の改行は無視
-                            None
-                        } else if self.last_char_was_newline {
-                            // 連続する改行は無視
+                        if self.last_char_was_newline {
+                            // 連続する改行は無視（XMLタグ内外に関わらず）
                             None
                         } else {
-                            // 最初の改行は出力
+                            // 最初の改行は出力（XMLタグ内外に関わらず）
                             self.last_char_was_newline = true;
                             Some(ToolCallEvent::Text(c.to_string()))
                         }
-                    } else if !c.trim().is_empty() {
-                        // 通常のテキスト
+                    } else {
+                        // 空白文字を含むすべての文字を出力
                         self.last_char_was_newline = false;
                         Some(ToolCallEvent::Text(c.to_string()))
-                    } else if self.in_xml {
-                        // XMLタグ内の空白は無視
-                        None
-                    } else {
-                        // その他の空白は無視
-                        None
                     }
                 }
             }
@@ -278,14 +268,14 @@ mod tests {
     #[tokio::test]
     async fn test_stream_to_stream() -> Result<()> {
         let input = r#"明日のニューヨークの天気ですね。承知いたしました。
-        
-        <get_weather>
-          <location>New York</location>
-          <date>tomorrow</date>
-          <unit>fahrenheit</unit>
-        </get_weather>
-        
-        結果が取得でき次第、すぐにお知らせします。"#;
+
+<get_weather>
+  <location>New York</location>
+  <date>tomorrow</date>
+  <unit>fahrenheit</unit>
+</get_weather>
+
+結果が取得でき次第、すぐにお知らせします。"#;
         let input_stream = Box::pin(futures::stream::iter(input.chars().map(|c| c.to_string())));
 
         let expected_events = vec![
@@ -355,6 +345,144 @@ mod tests {
         while let Some(event) = stream.next().await {
             events.push(event);
         }
+        assert_eq!(events, expected_events);
+        Ok(())
+    }
+
+    /// ファイル書き込みのツール呼び出しのテスト
+    ///
+    /// このテストでは以下の点を確認します：
+    /// - ツール呼び出しの前後のテキストの処理
+    /// - 複数行のコンテンツを含むパラメータの処理
+    /// - 改行とインデントの適切な処理
+    #[tokio::test]
+    async fn test_write_to_file() -> Result<()> {
+        let input = r#"Okay, I will write the following content to the file.
+<write_to_file>
+<path>src/main.rs</path>
+<content>
+fn main() {
+    println!("Hello, world!");
+}
+</content>
+</write_to_file>
+Let me know if that looks correct."#;
+
+        let input_stream = Box::pin(futures::stream::iter(input.chars().map(|c| c.to_string())));
+
+        let expected_events = vec![
+            // 最初のテキスト
+            ToolCallEvent::Text("O".into()),
+            ToolCallEvent::Text("k".into()),
+            ToolCallEvent::Text("a".into()),
+            ToolCallEvent::Text("y".into()),
+            ToolCallEvent::Text(",".into()),
+            ToolCallEvent::Text(" ".into()),
+            ToolCallEvent::Text("I".into()),
+            ToolCallEvent::Text(" ".into()),
+            ToolCallEvent::Text("w".into()),
+            ToolCallEvent::Text("i".into()),
+            ToolCallEvent::Text("l".into()),
+            ToolCallEvent::Text("l".into()),
+            ToolCallEvent::Text(" ".into()),
+            ToolCallEvent::Text("w".into()),
+            ToolCallEvent::Text("r".into()),
+            ToolCallEvent::Text("i".into()),
+            ToolCallEvent::Text("t".into()),
+            ToolCallEvent::Text("e".into()),
+            ToolCallEvent::Text(" ".into()),
+            ToolCallEvent::Text("t".into()),
+            ToolCallEvent::Text("h".into()),
+            ToolCallEvent::Text("e".into()),
+            ToolCallEvent::Text(" ".into()),
+            ToolCallEvent::Text("f".into()),
+            ToolCallEvent::Text("o".into()),
+            ToolCallEvent::Text("l".into()),
+            ToolCallEvent::Text("l".into()),
+            ToolCallEvent::Text("o".into()),
+            ToolCallEvent::Text("w".into()),
+            ToolCallEvent::Text("i".into()),
+            ToolCallEvent::Text("n".into()),
+            ToolCallEvent::Text("g".into()),
+            ToolCallEvent::Text(" ".into()),
+            ToolCallEvent::Text("c".into()),
+            ToolCallEvent::Text("o".into()),
+            ToolCallEvent::Text("n".into()),
+            ToolCallEvent::Text("t".into()),
+            ToolCallEvent::Text("e".into()),
+            ToolCallEvent::Text("n".into()),
+            ToolCallEvent::Text("t".into()),
+            ToolCallEvent::Text(" ".into()),
+            ToolCallEvent::Text("t".into()),
+            ToolCallEvent::Text("o".into()),
+            ToolCallEvent::Text(" ".into()),
+            ToolCallEvent::Text("t".into()),
+            ToolCallEvent::Text("h".into()),
+            ToolCallEvent::Text("e".into()),
+            ToolCallEvent::Text(" ".into()),
+            ToolCallEvent::Text("f".into()),
+            ToolCallEvent::Text("i".into()),
+            ToolCallEvent::Text("l".into()),
+            ToolCallEvent::Text("e".into()),
+            ToolCallEvent::Text(".".into()),
+            ToolCallEvent::Text("\n".into()),
+            // ツール呼び出しの開始
+            ToolCallEvent::ToolStart {
+                name: "write_to_file".to_string(),
+            },
+            // パラメータ
+            ToolCallEvent::Parameter {
+                arguments: serde_json::json!({
+                    "path": "src/main.rs",
+                    "content": "fn main() {\n    println!(\"Hello, world!\");\n}"
+                }),
+            },
+            // ツール呼び出しの終了
+            ToolCallEvent::ToolEnd,
+            // 最後のテキスト
+            ToolCallEvent::Text("\n".into()),
+            ToolCallEvent::Text("L".into()),
+            ToolCallEvent::Text("e".into()),
+            ToolCallEvent::Text("t".into()),
+            ToolCallEvent::Text(" ".into()),
+            ToolCallEvent::Text("m".into()),
+            ToolCallEvent::Text("e".into()),
+            ToolCallEvent::Text(" ".into()),
+            ToolCallEvent::Text("k".into()),
+            ToolCallEvent::Text("n".into()),
+            ToolCallEvent::Text("o".into()),
+            ToolCallEvent::Text("w".into()),
+            ToolCallEvent::Text(" ".into()),
+            ToolCallEvent::Text("i".into()),
+            ToolCallEvent::Text("f".into()),
+            ToolCallEvent::Text(" ".into()),
+            ToolCallEvent::Text("t".into()),
+            ToolCallEvent::Text("h".into()),
+            ToolCallEvent::Text("a".into()),
+            ToolCallEvent::Text("t".into()),
+            ToolCallEvent::Text(" ".into()),
+            ToolCallEvent::Text("l".into()),
+            ToolCallEvent::Text("o".into()),
+            ToolCallEvent::Text("o".into()),
+            ToolCallEvent::Text("k".into()),
+            ToolCallEvent::Text("s".into()),
+            ToolCallEvent::Text(" ".into()),
+            ToolCallEvent::Text("c".into()),
+            ToolCallEvent::Text("o".into()),
+            ToolCallEvent::Text("r".into()),
+            ToolCallEvent::Text("r".into()),
+            ToolCallEvent::Text("e".into()),
+            ToolCallEvent::Text("c".into()),
+            ToolCallEvent::Text("t".into()),
+            ToolCallEvent::Text(".".into()),
+        ];
+
+        let mut stream = stream_to_stream(input_stream)?;
+        let mut events = Vec::new();
+        while let Some(event) = stream.next().await {
+            events.push(event);
+        }
+
         assert_eq!(events, expected_events);
         Ok(())
     }
