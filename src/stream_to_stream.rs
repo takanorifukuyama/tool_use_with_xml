@@ -18,31 +18,6 @@
 //! - `Text`: XMLタグ以外のテキスト
 //! - `Error`: エラー発生時のイベント
 //!
-//! # 実行方法
-//!
-//! ## ビルドと実行
-//!
-//! ```bash
-//! # ビルド
-//! cargo build --bin stream_to_stream
-//!
-//! # 実行
-//! cargo run --bin stream_to_stream
-//! ```
-//!
-//! ## テストの実行
-//!
-//! ```bash
-//! # すべてのテストを実行
-//! cargo test --package tool_use_with_xml --bin stream_to_stream
-//!
-//! # 特定のテストを実行（例：test_stream_to_stream）
-//! cargo test --package tool_use_with_xml --bin stream_to_stream -- tests::test_stream_to_stream --exact
-//!
-//! # テスト出力を表示
-//! cargo test --package tool_use_with_xml --bin stream_to_stream -- tests --show-output
-//! ```
-//!
 //! # 使用例
 //!
 //! ```rust
