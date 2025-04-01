@@ -91,7 +91,7 @@ enum ParserState {
     /// ツールタグ内：<tool_name> と </tool_name> の間
     InToolTag,
     /// パラメータタグ内：<param_name> と </param_name> の間
-    InParameterTag(String), // param_name
+    InParameterTag,
 }
 
 /// XMLストリームをイベントストリームに変換するための構造体
@@ -178,9 +178,9 @@ impl StreamToStream {
                 if c == ">" {
                     // タグの終了
                     let tag = std::mem::take(&mut self.tag_buffer);
-                    if tag.starts_with('/') {
+                    if let Some(tag_name) = tag.strip_prefix('/') {
                         // 終了タグの処理
-                        let tag_name = tag[1..].to_string();
+                        let tag_name = tag_name.to_string();
                         if let Some(current_tool) = &self.current_tool {
                             if current_tool == &tag_name {
                                 // ツールの終了
@@ -230,7 +230,7 @@ impl StreamToStream {
                         Some(ToolCallEvent::ToolStart { id, name: tag })
                     } else {
                         // パラメータタグの開始
-                        self.state = ParserState::InParameterTag(tag);
+                        self.state = ParserState::InParameterTag;
                         self.param_value_buffer.clear();
                         None
                     }
@@ -253,7 +253,7 @@ impl StreamToStream {
                     None
                 }
             }
-            ParserState::InParameterTag(_) => {
+            ParserState::InParameterTag => {
                 if c == "<" {
                     // パラメータタグの終了
                     self.state = ParserState::InTag;

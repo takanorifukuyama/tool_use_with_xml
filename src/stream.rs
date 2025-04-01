@@ -24,7 +24,6 @@ enum ParserState {
     Initial,
     InTool(String),
     InParameter { name: String, tool: String },
-    ExpectingParameterValue { name: String, tool: String },
 }
 
 // パーサーの状態更新を表す構造体
@@ -89,17 +88,6 @@ impl ToolCallStream {
         reader.trim_text(true);
         reader.check_end_names(false);
         reader
-    }
-
-    fn update_position(&mut self, event: &Event) {
-        let size = match event {
-            Event::Start(e) => e.name().as_ref().len() + 2, // < + name + >
-            Event::End(e) => e.name().as_ref().len() + 3,   // </ + name + >
-            Event::Text(e) => e.as_ref().len(),
-            Event::Eof => 0,
-            _ => 1,
-        };
-        self.position += size;
     }
 
     fn process_event(&self, event: &Event, state: &ParserState) -> StateUpdate {
