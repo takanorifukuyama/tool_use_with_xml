@@ -95,7 +95,7 @@ enum ParserState {
 }
 
 /// XMLストリームをイベントストリームに変換するための構造体
-struct StreamToStream {
+struct XmlStreamParser {
     /// 入力ストリーム
     input: BoxStream<'static, String>,
     /// タグ名を一時的に保存するバッファ
@@ -122,7 +122,7 @@ struct StreamToStream {
     char_buffer: String,
 }
 
-impl StreamToStream {
+impl XmlStreamParser {
     /// 新しいStreamToStreamインスタンスを作成
     fn new(input: BoxStream<'static, String>) -> Self {
         Self {
@@ -310,7 +310,7 @@ impl StreamToStream {
 }
 
 /// Stream traitの実装
-impl Stream for StreamToStream {
+impl Stream for XmlStreamParser {
     type Item = ToolCallEvent;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
@@ -349,7 +349,7 @@ impl Stream for StreamToStream {
 
 /// 入力ストリームをツール呼び出しイベントのストリームに変換
 fn stream_to_stream(input: BoxStream<'static, String>) -> ToolCallStreamResult {
-    let stream = StreamToStream::new(input);
+    let stream = XmlStreamParser::new(input);
     Ok(Box::pin(stream))
 }
 
@@ -424,6 +424,109 @@ mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
     use tokio_stream::StreamExt;
+
+    #[tokio::test]
+    async fn test_stream_to_stream_only_text() -> Result<()> {
+        let input = r#"明日のニューヨークの天気ですね。承知いたしました。
+
+結果が取得でき次第、すぐにお知らせします。"#;
+        let input_stream = Box::pin(futures::stream::iter(input.chars().map(|c| c.to_string())));
+
+        let expected_events = vec![
+            // 一文字ずつ返す
+            ToolCallEvent::Text("明".into()),
+            ToolCallEvent::Text("日".into()),
+            ToolCallEvent::Text("の".into()),
+            ToolCallEvent::Text("ニ".into()),
+            ToolCallEvent::Text("ュ".into()),
+            ToolCallEvent::Text("ー".into()),
+            ToolCallEvent::Text("ヨ".into()),
+            ToolCallEvent::Text("ー".into()),
+            ToolCallEvent::Text("ク".into()),
+            ToolCallEvent::Text("の".into()),
+            ToolCallEvent::Text("天".into()),
+            ToolCallEvent::Text("気".into()),
+            ToolCallEvent::Text("で".into()),
+            ToolCallEvent::Text("す".into()),
+            ToolCallEvent::Text("ね".into()),
+            ToolCallEvent::Text("。".into()),
+            ToolCallEvent::Text("承".into()),
+            ToolCallEvent::Text("知".into()),
+            ToolCallEvent::Text("い".into()),
+            ToolCallEvent::Text("た".into()),
+            ToolCallEvent::Text("し".into()),
+            ToolCallEvent::Text("ま".into()),
+            ToolCallEvent::Text("し".into()),
+            ToolCallEvent::Text("た".into()),
+            ToolCallEvent::Text("。".into()),
+            ToolCallEvent::Text("\n".into()),
+            ToolCallEvent::Text("\n".into()),
+            ToolCallEvent::Text("結".into()),
+            ToolCallEvent::Text("果".into()),
+            ToolCallEvent::Text("が".into()),
+            ToolCallEvent::Text("取".into()),
+            ToolCallEvent::Text("得".into()),
+            ToolCallEvent::Text("で".into()),
+            ToolCallEvent::Text("き".into()),
+            ToolCallEvent::Text("次".into()),
+            ToolCallEvent::Text("第".into()),
+            ToolCallEvent::Text("、".into()),
+            ToolCallEvent::Text("す".into()),
+            ToolCallEvent::Text("ぐ".into()),
+            ToolCallEvent::Text("に".into()),
+            ToolCallEvent::Text("お".into()),
+            ToolCallEvent::Text("知".into()),
+            ToolCallEvent::Text("ら".into()),
+            ToolCallEvent::Text("せ".into()),
+            ToolCallEvent::Text("し".into()),
+            ToolCallEvent::Text("ま".into()),
+            ToolCallEvent::Text("す".into()),
+            ToolCallEvent::Text("。".into()),
+        ];
+        let mut stream = stream_to_stream(input_stream)?;
+        let mut events = Vec::new();
+        while let Some(event) = stream.next().await {
+            events.push(event);
+        }
+        assert_eq!(events, expected_events);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_stream_to_stream_only_tool_call() -> Result<()> {
+        let input = r#"<get_weather>
+  <location>New York</location>
+  <date>tomorrow</date>
+  <unit>fahrenheit</unit>
+</get_weather>"#;
+        let input_stream = Box::pin(futures::stream::iter(input.chars().map(|c| c.to_string())));
+
+        let expected_events = vec![
+            // 一文字ずつ返す
+            ToolCallEvent::ToolStart {
+                id: "tool_1".to_string(),
+                name: "get_weather".to_string(),
+            },
+            ToolCallEvent::Parameter {
+                id: "tool_1".to_string(),
+                arguments: serde_json::json!({
+                    "location": "New York",
+                    "date": "tomorrow",
+                    "unit": "fahrenheit"
+                }),
+            },
+            ToolCallEvent::ToolEnd {
+                id: "tool_1".to_string(),
+            },
+        ];
+        let mut stream = stream_to_stream(input_stream)?;
+        let mut events = Vec::new();
+        while let Some(event) = stream.next().await {
+            events.push(event);
+        }
+        assert_eq!(events, expected_events);
+        Ok(())
+    }
 
     /// メインのストリーム変換テスト
     ///
