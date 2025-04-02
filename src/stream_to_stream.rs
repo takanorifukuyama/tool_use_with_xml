@@ -144,127 +144,139 @@ impl StreamToStream {
         format!("tool_{}", self.id_counter)
     }
 
+    /// 通常状態（XMLタグ外）での文字処理
+    fn process_normal_state(&mut self, c: &str) -> Option<ToolCallEvent> {
+        if c == "<" {
+            self.state = ParserState::InTag;
+            self.tag_buffer.clear();
+            self.in_xml = true;
+            None
+        } else if c == "\n" {
+            if self.last_char_was_newline {
+                None
+            } else {
+                self.last_char_was_newline = true;
+                Some(ToolCallEvent::Text(c.to_string()))
+            }
+        } else {
+            self.last_char_was_newline = false;
+            Some(ToolCallEvent::Text(c.to_string()))
+        }
+    }
+
+    /// タグ内での文字処理
+    fn process_in_tag_state(&mut self, c: &str) -> Option<ToolCallEvent> {
+        if c == ">" {
+            let tag = std::mem::take(&mut self.tag_buffer);
+            if let Some(tag_name) = tag.strip_prefix('/') {
+                self.process_closing_tag(tag_name)
+            } else {
+                self.process_opening_tag(tag)
+            }
+        } else {
+            self.tag_buffer.push_str(c);
+            None
+        }
+    }
+
+    /// 終了タグの処理
+    fn process_closing_tag(&mut self, tag_name: &str) -> Option<ToolCallEvent> {
+        let tag_name = tag_name.to_string();
+        if let Some(current_tool) = &self.current_tool {
+            if current_tool == &tag_name {
+                self.process_tool_end()
+            } else {
+                self.process_parameter_end(tag_name)
+            }
+        } else {
+            self.state = ParserState::Normal;
+            self.in_xml = false;
+            None
+        }
+    }
+
+    /// ツール終了の処理
+    fn process_tool_end(&mut self) -> Option<ToolCallEvent> {
+        self.state = ParserState::Normal;
+        let id = self
+            .current_id
+            .clone()
+            .unwrap_or_else(|| "unknown".to_string());
+        self.current_tool = None;
+        self.in_xml = false;
+        self.last_char_was_newline = false;
+
+        if !self.current_params.is_empty() {
+            let params = std::mem::take(&mut self.current_params);
+            self.need_to_emit_tool_end = true;
+            Some(ToolCallEvent::Parameter {
+                id: id.clone(),
+                arguments: serde_json::Value::Object(params),
+            })
+        } else {
+            self.current_id = None;
+            Some(ToolCallEvent::ToolEnd { id })
+        }
+    }
+
+    /// パラメータ終了の処理
+    fn process_parameter_end(&mut self, tag_name: String) -> Option<ToolCallEvent> {
+        let value = std::mem::take(&mut self.param_value_buffer);
+        self.current_params.insert(
+            tag_name,
+            serde_json::Value::String(value.trim().to_string()),
+        );
+        self.state = ParserState::InToolTag;
+        None
+    }
+
+    /// 開始タグの処理
+    fn process_opening_tag(&mut self, tag: String) -> Option<ToolCallEvent> {
+        if self.current_tool.is_none() {
+            let id = self.generate_id();
+            self.current_id = Some(id.clone());
+            self.current_tool = Some(tag.clone());
+            self.state = ParserState::InToolTag;
+            Some(ToolCallEvent::ToolStart { id, name: tag })
+        } else {
+            self.state = ParserState::InParameterTag;
+            self.param_value_buffer.clear();
+            None
+        }
+    }
+
+    /// ツールタグ内での文字処理
+    fn process_in_tool_tag_state(&mut self, c: &str) -> Option<ToolCallEvent> {
+        if c == "<" {
+            self.state = ParserState::InTag;
+            self.tag_buffer.clear();
+            None
+        } else if !c.trim().is_empty() {
+            Some(ToolCallEvent::Text(c.to_string()))
+        } else {
+            None
+        }
+    }
+
+    /// パラメータタグ内での文字処理
+    fn process_in_parameter_tag_state(&mut self, c: &str) -> Option<ToolCallEvent> {
+        if c == "<" {
+            self.state = ParserState::InTag;
+            self.tag_buffer.clear();
+            None
+        } else {
+            self.param_value_buffer.push_str(c);
+            None
+        }
+    }
+
     /// 1文字を処理し、必要に応じてイベントを生成
-    ///
-    /// # 改行の処理ルール
-    /// - XMLタグ内の改行は無視
-    /// - 連続する改行は1回だけ出力
-    /// - それ以外の改行は通常通り出力
     fn process_char(&mut self, c: &str) -> Option<ToolCallEvent> {
         match &self.state {
-            ParserState::Normal => {
-                if c == "<" {
-                    // XMLタグの開始
-                    self.state = ParserState::InTag;
-                    self.tag_buffer.clear();
-                    self.in_xml = true;
-                    None
-                } else if c == "\n" {
-                    if self.last_char_was_newline {
-                        // 連続する改行は無視（XMLタグ内外に関わらず）
-                        None
-                    } else {
-                        // 最初の改行は出力（XMLタグ内外に関わらず）
-                        self.last_char_was_newline = true;
-                        Some(ToolCallEvent::Text(c.to_string()))
-                    }
-                } else {
-                    // 空白文字を含むすべての文字を出力
-                    self.last_char_was_newline = false;
-                    Some(ToolCallEvent::Text(c.to_string()))
-                }
-            }
-            ParserState::InTag => {
-                if c == ">" {
-                    // タグの終了
-                    let tag = std::mem::take(&mut self.tag_buffer);
-                    if let Some(tag_name) = tag.strip_prefix('/') {
-                        // 終了タグの処理
-                        let tag_name = tag_name.to_string();
-                        if let Some(current_tool) = &self.current_tool {
-                            if current_tool == &tag_name {
-                                // ツールの終了
-                                self.state = ParserState::Normal;
-                                let id = self
-                                    .current_id
-                                    .clone()
-                                    .unwrap_or_else(|| "unknown".to_string());
-                                self.current_tool = None;
-                                self.in_xml = false;
-                                self.last_char_was_newline = false;
-                                if !self.current_params.is_empty() {
-                                    // パラメータがある場合は、まずパラメータを出力
-                                    let params = std::mem::take(&mut self.current_params);
-                                    self.need_to_emit_tool_end = true;
-                                    Some(ToolCallEvent::Parameter {
-                                        id: id.clone(),
-                                        arguments: serde_json::Value::Object(params),
-                                    })
-                                } else {
-                                    // パラメータがない場合は、直接ToolEndを出力
-                                    self.current_id = None;
-                                    Some(ToolCallEvent::ToolEnd { id })
-                                }
-                            } else {
-                                // パラメータタグの終了
-                                let value = std::mem::take(&mut self.param_value_buffer);
-                                self.current_params.insert(
-                                    tag_name,
-                                    serde_json::Value::String(value.trim().to_string()),
-                                );
-                                self.state = ParserState::InToolTag;
-                                None
-                            }
-                        } else {
-                            // 予期しない終了タグ
-                            self.state = ParserState::Normal;
-                            self.in_xml = false;
-                            None
-                        }
-                    } else if self.current_tool.is_none() {
-                        // ツールの開始
-                        let id = self.generate_id();
-                        self.current_id = Some(id.clone());
-                        self.current_tool = Some(tag.clone());
-                        self.state = ParserState::InToolTag;
-                        Some(ToolCallEvent::ToolStart { id, name: tag })
-                    } else {
-                        // パラメータタグの開始
-                        self.state = ParserState::InParameterTag;
-                        self.param_value_buffer.clear();
-                        None
-                    }
-                } else {
-                    // タグ名の収集
-                    self.tag_buffer.push_str(c);
-                    None
-                }
-            }
-            ParserState::InToolTag => {
-                if c == "<" {
-                    // 新しいタグの開始
-                    self.state = ParserState::InTag;
-                    self.tag_buffer.clear();
-                    None
-                } else if !c.trim().is_empty() {
-                    // ツールタグ内のテキスト
-                    Some(ToolCallEvent::Text(c.to_string()))
-                } else {
-                    None
-                }
-            }
-            ParserState::InParameterTag => {
-                if c == "<" {
-                    // パラメータタグの終了
-                    self.state = ParserState::InTag;
-                    self.tag_buffer.clear();
-                    None
-                } else {
-                    // パラメータ値の収集
-                    self.param_value_buffer.push_str(c);
-                    None
-                }
-            }
+            ParserState::Normal => self.process_normal_state(c),
+            ParserState::InTag => self.process_in_tag_state(c),
+            ParserState::InToolTag => self.process_in_tool_tag_state(c),
+            ParserState::InParameterTag => self.process_in_parameter_tag_state(c),
         }
     }
 }
