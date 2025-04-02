@@ -118,6 +118,8 @@ struct StreamToStream {
     current_id: Option<String>,
     /// IDカウンター
     id_counter: u64,
+    /// 未処理の文字を保持するバッファ
+    char_buffer: String,
 }
 
 impl StreamToStream {
@@ -135,6 +137,7 @@ impl StreamToStream {
             in_xml: false,
             current_id: None,
             id_counter: 0,
+            char_buffer: String::new(),
         }
     }
 
@@ -151,15 +154,7 @@ impl StreamToStream {
             self.tag_buffer.clear();
             self.in_xml = true;
             None
-        } else if c == "\n" {
-            if self.last_char_was_newline {
-                None
-            } else {
-                self.last_char_was_newline = true;
-                Some(ToolCallEvent::Text(c.to_string()))
-            }
         } else {
-            self.last_char_was_newline = false;
             Some(ToolCallEvent::Text(c.to_string()))
         }
     }
@@ -184,9 +179,39 @@ impl StreamToStream {
         let tag_name = tag_name.to_string();
         if let Some(current_tool) = &self.current_tool {
             if current_tool == &tag_name {
-                self.process_tool_end()
+                // ツール終了の処理
+                self.state = ParserState::Normal;
+                let id = self
+                    .current_id
+                    .take()
+                    .unwrap_or_else(|| "unknown".to_string());
+                self.current_tool = None;
+                self.in_xml = false;
+                self.last_char_was_newline = false;
+
+                // パラメータがある場合は、まずParameterイベントを返す
+                if !self.current_params.is_empty() {
+                    let params = std::mem::take(&mut self.current_params);
+                    self.need_to_emit_tool_end = true;
+                    self.current_id = Some(id.clone());
+                    Some(ToolCallEvent::Parameter {
+                        id,
+                        arguments: serde_json::Value::Object(params),
+                    })
+                } else {
+                    Some(ToolCallEvent::ToolEnd { id })
+                }
             } else {
-                self.process_parameter_end(tag_name)
+                // パラメータタグの終了処理
+                let value = std::mem::take(&mut self.param_value_buffer);
+                if !value.trim().is_empty() {
+                    self.current_params.insert(
+                        tag_name,
+                        serde_json::Value::String(value.trim().to_string()),
+                    );
+                }
+                self.state = ParserState::InToolTag;
+                None
             }
         } else {
             self.state = ParserState::Normal;
@@ -196,6 +221,7 @@ impl StreamToStream {
     }
 
     /// ツール終了の処理
+    #[allow(dead_code)]
     fn process_tool_end(&mut self) -> Option<ToolCallEvent> {
         self.state = ParserState::Normal;
         let id = self
@@ -220,12 +246,15 @@ impl StreamToStream {
     }
 
     /// パラメータ終了の処理
+    #[allow(dead_code)]
     fn process_parameter_end(&mut self, tag_name: String) -> Option<ToolCallEvent> {
         let value = std::mem::take(&mut self.param_value_buffer);
-        self.current_params.insert(
-            tag_name,
-            serde_json::Value::String(value.trim().to_string()),
-        );
+        if !value.trim().is_empty() {
+            self.current_params.insert(
+                tag_name,
+                serde_json::Value::String(value.trim().to_string()),
+            );
+        }
         self.state = ParserState::InToolTag;
         None
     }
@@ -251,9 +280,8 @@ impl StreamToStream {
             self.state = ParserState::InTag;
             self.tag_buffer.clear();
             None
-        } else if !c.trim().is_empty() {
-            Some(ToolCallEvent::Text(c.to_string()))
         } else {
+            // ツールタグ内のテキストは無視する
             None
         }
     }
@@ -296,35 +324,24 @@ impl Stream for StreamToStream {
             }
         }
 
-        // 入力ストリームからの次の文字を処理
+        // バッファに残っている文字がある場合は、それを処理
+        if !this.char_buffer.is_empty() {
+            let c = this.char_buffer.remove(0).to_string();
+            if let Some(event) = this.process_char(&c) {
+                return Poll::Ready(Some(event));
+            }
+            return self.poll_next(cx);
+        }
+
+        // 入力ストリームからの次の文字列を処理
         match this.input.poll_next_unpin(cx) {
-            Poll::Ready(Some(c)) => {
-                if let Some(event) = this.process_char(&c) {
-                    Poll::Ready(Some(event))
-                } else {
-                    self.poll_next(cx)
-                }
+            Poll::Ready(Some(s)) => {
+                // 受け取った文字列をバッファに追加
+                this.char_buffer.push_str(&s);
+                // 再帰的に次の文字を処理
+                self.poll_next(cx)
             }
-            Poll::Ready(None) => {
-                // 入力ストリームの終了処理
-                if this.need_to_emit_tool_end {
-                    this.need_to_emit_tool_end = false;
-                    if let Some(id) = this.current_id.take() {
-                        Poll::Ready(Some(ToolCallEvent::ToolEnd { id }))
-                    } else {
-                        Poll::Ready(None)
-                    }
-                } else if this.current_tool.is_some() {
-                    if let Some(id) = this.current_id.take() {
-                        this.current_tool = None;
-                        Poll::Ready(Some(ToolCallEvent::ToolEnd { id }))
-                    } else {
-                        Poll::Ready(None)
-                    }
-                } else {
-                    Poll::Ready(None)
-                }
-            }
+            Poll::Ready(None) => Poll::Ready(None),
             Poll::Pending => Poll::Pending,
         }
     }
@@ -456,6 +473,7 @@ mod tests {
             ToolCallEvent::Text("た".into()),
             ToolCallEvent::Text("。".into()),
             ToolCallEvent::Text("\n".into()),
+            ToolCallEvent::Text("\n".into()),
             ToolCallEvent::ToolStart {
                 id: "tool_1".to_string(),
                 name: "get_weather".to_string(),
@@ -471,6 +489,113 @@ mod tests {
             ToolCallEvent::ToolEnd {
                 id: "tool_1".to_string(),
             },
+            ToolCallEvent::Text("\n".into()),
+            ToolCallEvent::Text("\n".into()),
+            ToolCallEvent::Text("結".into()),
+            ToolCallEvent::Text("果".into()),
+            ToolCallEvent::Text("が".into()),
+            ToolCallEvent::Text("取".into()),
+            ToolCallEvent::Text("得".into()),
+            ToolCallEvent::Text("で".into()),
+            ToolCallEvent::Text("き".into()),
+            ToolCallEvent::Text("次".into()),
+            ToolCallEvent::Text("第".into()),
+            ToolCallEvent::Text("、".into()),
+            ToolCallEvent::Text("す".into()),
+            ToolCallEvent::Text("ぐ".into()),
+            ToolCallEvent::Text("に".into()),
+            ToolCallEvent::Text("お".into()),
+            ToolCallEvent::Text("知".into()),
+            ToolCallEvent::Text("ら".into()),
+            ToolCallEvent::Text("せ".into()),
+            ToolCallEvent::Text("し".into()),
+            ToolCallEvent::Text("ま".into()),
+            ToolCallEvent::Text("す".into()),
+            ToolCallEvent::Text("。".into()),
+        ];
+        let mut stream = stream_to_stream(input_stream)?;
+        let mut events = Vec::new();
+        while let Some(event) = stream.next().await {
+            events.push(event);
+        }
+        assert_eq!(events, expected_events);
+        Ok(())
+    }
+
+    /// メインのストリーム変換テスト
+    ///
+    /// このテストでは以下の点を確認します：
+    /// - テキストの3文字ずつの処理
+    /// - XMLタグの適切な解析
+    /// - パラメータの収集と出力
+    /// - 改行の適切な処理
+    #[tokio::test]
+    async fn test_stream_to_stream_2() -> Result<()> {
+        let input = r#"明日のニューヨークの天気ですね。承知いたしました。
+
+<get_weather>
+  <location>New York</location>
+  <date>tomorrow</date>
+  <unit>fahrenheit</unit>
+</get_weather>
+
+結果が取得でき次第、すぐにお知らせします。"#;
+        let input_stream = Box::pin(futures::stream::iter(
+            input
+                .chars()
+                .map(|c| c.to_string())
+                .collect::<Vec<_>>()
+                .chunks(3)
+                .map(|chunk| chunk.join(""))
+                .collect::<Vec<_>>()
+                .into_iter(),
+        ));
+
+        let expected_events = vec![
+            // 一文字ずつ返す
+            ToolCallEvent::Text("明".into()),
+            ToolCallEvent::Text("日".into()),
+            ToolCallEvent::Text("の".into()),
+            ToolCallEvent::Text("ニ".into()),
+            ToolCallEvent::Text("ュ".into()),
+            ToolCallEvent::Text("ー".into()),
+            ToolCallEvent::Text("ヨ".into()),
+            ToolCallEvent::Text("ー".into()),
+            ToolCallEvent::Text("ク".into()),
+            ToolCallEvent::Text("の".into()),
+            ToolCallEvent::Text("天".into()),
+            ToolCallEvent::Text("気".into()),
+            ToolCallEvent::Text("で".into()),
+            ToolCallEvent::Text("す".into()),
+            ToolCallEvent::Text("ね".into()),
+            ToolCallEvent::Text("。".into()),
+            ToolCallEvent::Text("承".into()),
+            ToolCallEvent::Text("知".into()),
+            ToolCallEvent::Text("い".into()),
+            ToolCallEvent::Text("た".into()),
+            ToolCallEvent::Text("し".into()),
+            ToolCallEvent::Text("ま".into()),
+            ToolCallEvent::Text("し".into()),
+            ToolCallEvent::Text("た".into()),
+            ToolCallEvent::Text("。".into()),
+            ToolCallEvent::Text("\n".into()),
+            ToolCallEvent::Text("\n".into()),
+            ToolCallEvent::ToolStart {
+                id: "tool_1".to_string(),
+                name: "get_weather".to_string(),
+            },
+            ToolCallEvent::Parameter {
+                id: "tool_1".to_string(),
+                arguments: serde_json::json!({
+                    "location": "New York",
+                    "date": "tomorrow",
+                    "unit": "fahrenheit"
+                }),
+            },
+            ToolCallEvent::ToolEnd {
+                id: "tool_1".to_string(),
+            },
+            ToolCallEvent::Text("\n".into()),
             ToolCallEvent::Text("\n".into()),
             ToolCallEvent::Text("結".into()),
             ToolCallEvent::Text("果".into()),
